@@ -1,6 +1,12 @@
 package gorbac_redis
 
-import "github.com/redis/go-redis/v9"
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"github.com/kordar/gorbac/db"
+	"github.com/redis/go-redis/v9"
+)
 
 type RedisRbac struct {
 	rdb   redis.UniversalClient
@@ -15,24 +21,34 @@ func (rbac *RedisRbac) key(tb string) string {
 	return rbac.table + ":" + tb
 }
 
-//func (rbac *RedisRbac) AddItem(authItem db.AuthItem) error {
-//	ctx := context.Background()
-//	_, err := rbac.db.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-//		key := rbac.key(authItem.TableName())
-//		pipe.HSet(ctx, key, authItem.Name, authItem)
-//		typeKey := fmt.Sprintf("%s-%d", key, authItem.Type)
-//		pipe.SAdd(ctx, typeKey, authItem.Name)
-//		return nil
-//	})
-//	return err
-//}
-//
-//func (rbac *RedisRbac) GetItem(name string) (*db.AuthItem, error) {
-//	ctx := context.Background()
-//	item := db.AuthItem{}
-//	err := rbac.db.HGet(ctx, rbac.key(item.TableName()), name).Scan(&item)
-//	return &item, err
-//}
+func (rbac *RedisRbac) AddItem(authItem db.AuthItem) error {
+	ctx := context.Background()
+	_, err := rbac.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		key := rbac.key(authItem.TableName())
+		if marshal, err := json.Marshal(&authItem); err == nil {
+			pipe.HSet(ctx, key, authItem.Name, string(marshal))
+			typeKey := fmt.Sprintf("%s-%d", key, authItem.Type)
+			pipe.SAdd(ctx, typeKey, authItem.Name)
+			return nil
+		} else {
+			return err
+		}
+	})
+
+	return err
+}
+
+func (rbac *RedisRbac) GetItem(name string) (*db.AuthItem, error) {
+	ctx := context.Background()
+	item := db.AuthItem{}
+	if str, err := rbac.rdb.HGet(ctx, rbac.key(item.TableName()), name).Bytes(); err == nil {
+		err2 := json.Unmarshal(str, &item)
+		return &item, err2
+	} else {
+		return nil, err
+	}
+}
+
 //
 //func (rbac *RedisRbac) GetItems(t int32) ([]*db.AuthItem, error) {
 //	var items []*db.AuthItem
