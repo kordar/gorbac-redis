@@ -2,10 +2,11 @@ package gorbac_redis
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/kordar/gorbac/db"
+	"github.com/kordar/gorbac"
 	"github.com/redis/go-redis/v9"
+	"time"
 )
 
 type RedisRbac struct {
@@ -21,89 +22,151 @@ func (rbac *RedisRbac) key(tb string) string {
 	return rbac.table + ":" + tb
 }
 
-func (rbac *RedisRbac) AddItem(authItem db.AuthItem) error {
+func (rbac *RedisRbac) AddItem(item gorbac.Item) error {
 	ctx := context.Background()
-	_, err := rbac.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-		key := rbac.key(authItem.TableName())
-		if marshal, err := json.Marshal(&authItem); err == nil {
-			pipe.HSet(ctx, key, authItem.Name, string(marshal))
-			typeKey := fmt.Sprintf("%s-%d", key, authItem.Type)
-			pipe.SAdd(ctx, typeKey, authItem.Name)
-			return nil
-		} else {
-			return err
-		}
-	})
-
-	return err
+	authItem := ToAuthItem(item)
+	key := rbac.key(authItem.TableName())
+	return rbac.rdb.HSet(ctx, key, item.GetName(), &authItem).Err()
 }
 
-func (rbac *RedisRbac) GetItem(name string) (*db.AuthItem, error) {
+func (rbac *RedisRbac) GetItem(name string) (gorbac.Item, error) {
 	ctx := context.Background()
-	item := db.AuthItem{}
-	if str, err := rbac.rdb.HGet(ctx, rbac.key(item.TableName()), name).Bytes(); err == nil {
-		err2 := json.Unmarshal(str, &item)
-		return &item, err2
+	authItem := AuthItem{}
+	key := rbac.key(authItem.TableName())
+	err := rbac.rdb.HGet(ctx, key, name).Scan(&authItem)
+	if err == nil {
+		item := ToItem(authItem)
+		return item, nil
 	} else {
 		return nil, err
 	}
 }
 
-//
-//func (rbac *RedisRbac) GetItems(t int32) ([]*db.AuthItem, error) {
-//	var items []*db.AuthItem
-//	item := db.AuthItem{}
-//	key := rbac.key(item.TableName())
-//	typeKey := fmt.Sprintf("%s-%d", key, t)
-//	members := rbac.db.SMembers(typeKey)
-//	rbac.db.HMGet(key, members.Val()...)
-//	//err := rbac.db.Where("type = ?", t).Find(&items).Error
-//	return items, err
-//}
-//
-//func (rbac *RedisRbac) FindAllItems() ([]*db.AuthItem, error) {
-//	var items []*db.AuthItem
-//	err := rbac.db.Find(&items).Error
-//	return items, err
-//}
-//
-//func (rbac *RedisRbac) AddRule(rule db.AuthRule) error {
-//	return rbac.db.Create(&rule).Error
-//}
-//
-//func (rbac *RedisRbac) GetRule(name string) (*db.AuthRule, error) {
-//	var rule db.AuthRule
-//	err := rbac.db.Where("name = ?", name).First(&rule).Error
-//	return &rule, err
-//}
-//
-//func (rbac *RedisRbac) GetRules() ([]*db.AuthRule, error) {
-//	var rules []*db.AuthRule
-//	err := rbac.db.Find(&rules).Error
-//	return rules, err
-//}
-//
-//func (rbac *RedisRbac) RemoveItem(name string) error {
-//	return rbac.db.Transaction(func(tx *gorm.DB) error {
-//		itemChild := db.AuthItemChild{}
-//		tx.Where("parent = ? or child = ?", name, name).Delete(&itemChild)
-//		assignment := db.AuthAssignment{}
-//		tx.Where("item_name = ?", name).Delete(&assignment)
-//		item := db.AuthItem{}
-//		tx.Where("name = ?", name).Delete(&item)
-//		return nil
-//	})
-//}
-//
-//func (rbac *RedisRbac) RemoveRule(ruleName string) error {
-//	return rbac.db.Transaction(func(tx *gorm.DB) error {
-//		item := db.AuthItem{}
-//		tx.Model(&item).Where("rule_name = ?", ruleName).Update("rule_name", nil)
-//		rule := db.AuthRule{}
-//		tx.Where("name = ?", ruleName).Delete(&rule)
-//		return nil
-//	})
-//}
+func (rbac *RedisRbac) scanItems(f func(authItem AuthItem)) {
+	ctx := context.Background()
+	key := rbac.key(gorbac.GetTableName("item"))
+	iter := rbac.rdb.HScan(ctx, key, 0, "*", 0).Iterator()
+	for iter.Next(ctx) {
+		ele := AuthItem{}
+		if err := ele.UnmarshalBinaryStr(iter.Val()); err == nil {
+			f(ele)
+		}
+	}
+}
+
+func (rbac *RedisRbac) GetItems(t int32) ([]gorbac.Item, error) {
+	items := make([]gorbac.Item, 0)
+	rbac.scanItems(func(authItem AuthItem) {
+		if t == authItem.Type {
+			item := ToItem(authItem)
+			items = append(items, item)
+		}
+	})
+	return items, nil
+}
+
+func (rbac *RedisRbac) FindAllItems() ([]gorbac.Item, error) {
+	items := make([]gorbac.Item, 0)
+	rbac.scanItems(func(authItem AuthItem) {
+		item := ToItem(authItem)
+		items = append(items, item)
+	})
+	return items, nil
+}
+
+func (rbac *RedisRbac) AddRule(rule gorbac.Rule) error {
+	ctx := context.Background()
+	authRule := ToAuthRule(rule)
+	key := rbac.key(authRule.TableName())
+	return rbac.rdb.HSet(ctx, key, authRule.Name, &authRule).Err()
+}
+
+func (rbac *RedisRbac) GetRule(name string) (*gorbac.Rule, error) {
+	ctx := context.Background()
+	authRule := AuthRule{}
+	key := rbac.key(authRule.TableName())
+	err := rbac.rdb.HGet(ctx, key, name).Scan(&authRule)
+	if err == nil {
+		rule := ToRule(authRule)
+		return rule, nil
+	} else {
+		return nil, err
+	}
+}
+
+func (rbac *RedisRbac) scanRules(f func(authRule AuthRule)) {
+	ctx := context.Background()
+	key := rbac.key(gorbac.GetTableName("rule"))
+	iter := rbac.rdb.HScan(ctx, key, 0, "*", 0).Iterator()
+	for iter.Next(ctx) {
+		ele := AuthRule{}
+		if err := ele.UnmarshalBinaryStr(iter.Val()); err == nil {
+			f(ele)
+		}
+	}
+}
+
+func (rbac *RedisRbac) GetRules() ([]*gorbac.Rule, error) {
+	rules := make([]*gorbac.Rule, 0)
+	rbac.scanRules(func(authRule AuthRule) {
+		rule := ToRule(authRule)
+		rules = append(rules, rule)
+	})
+	return rules, nil
+}
+
+func (rbac *RedisRbac) RemoveItem(name string) error {
+	//ctx := context.Background()
+	//
+	//// 解除所有父类关联name的元素，并删除子类、父类均为name的key
+	//authItemChild := AuthItemChild{}
+	//authItemChildKey := rbac.key(authItemChild.TableName())
+	//members := rbac.rdb.SMembers(ctx, fmt.Sprintf("%s-c:%s", authItemChildKey, name)).Val()
+	//if members != nil && len(members) > 0 {
+	//	for _, parent := range members {
+	//		rbac.rdb.SRem(ctx, fmt.Sprintf("%s:%s", authItemChildKey, parent), name)
+	//	}
+	//}
+	//rbac.rdb.Del(ctx, fmt.Sprintf("%s-c:%s", authItemChildKey, name))
+	//rbac.rdb.Del(ctx, fmt.Sprintf("%s:%s", authItemChildKey, name))
+	//
+	//// 将所有assignment关联的itemName清除
+	//authAssignmentKey := rbac.key(gorbac.GetTableName("assignment"))
+	//authAssignmentScanKey := fmt.Sprintf("%s:%s-*", authAssignmentKey, name)
+	//iter := rbac.rdb.Scan(ctx, 0, authAssignmentScanKey, 0).Iterator()
+	//for iter.Next(ctx) {
+	//	authAssignment := AuthAssignment{}
+	//	err := rbac.rdb.HGetAll(ctx, iter.Val()).Scan(&authAssignment)
+	//	if err == nil {
+	//		_ = rbac.RemoveAssignment(authAssignment.UserId, authAssignment.ItemName)
+	//	}
+	//}
+	//if err := iter.Err(); err != nil {
+	//	return err
+	//}
+	//
+	//// 移除item
+	//_ = rbac.RemoveItem(name)
+
+	return nil
+}
+
+func (rbac *RedisRbac) RemoveRule(ruleName string) error {
+	ctx := context.Background()
+	itemKey := rbac.key(gorbac.GetTableName("item"))
+	rbac.scanItems(func(authItem AuthItem) {
+		if authItem.RuleName == ruleName {
+			authItem.RuleName = ""
+			authItem.UpdateTime = time.Now()
+			rbac.rdb.HSet(ctx, itemKey, authItem.Name, &authItem)
+		}
+	})
+
+	ruleKey := rbac.key(gorbac.GetTableName("rule"))
+	rbac.rdb.HDel(ctx, ruleKey, ruleName)
+	return nil
+}
+
 //
 //func (rbac *RedisRbac) UpdateItem(itemName string, updateItem db.AuthItem) error {
 //	return rbac.db.Transaction(func(tx *gorm.DB) error {
@@ -119,16 +182,30 @@ func (rbac *RedisRbac) GetItem(name string) (*db.AuthItem, error) {
 //	})
 //}
 //
-//func (rbac *RedisRbac) UpdateRule(ruleName string, updateRule db.AuthRule) error {
-//	return rbac.db.Transaction(func(tx *gorm.DB) error {
-//		if ruleName != updateRule.Name {
-//			item := db.AuthItem{}
-//			tx.Model(&item).Where("rule_name = ?", ruleName).Update("rule_name", updateRule.Name)
-//		}
-//		rule := db.AuthRule{}
-//		return tx.Model(&rule).Where("name = ?", ruleName).Omit("create_at").Updates(&updateRule).Error
-//	})
-//}
+func (rbac *RedisRbac) UpdateRule(ruleName string, updateRule gorbac.Rule) error {
+	ctx := context.Background()
+	if ruleName != updateRule.Name {
+		itemKey := rbac.key(gorbac.GetTableName("item"))
+		rbac.scanItems(func(authItem AuthItem) {
+			if authItem.RuleName == ruleName {
+				authItem.RuleName = updateRule.Name
+				authItem.UpdateTime = time.Now()
+				rbac.rdb.HSet(ctx, itemKey, authItem.Name, &authItem)
+			}
+		})
+	}
+
+	_, err := rbac.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		ruleKey := rbac.key(gorbac.GetTableName("rule"))
+		pipe.HDel(ctx, ruleKey, ruleName)
+		authRule := ToAuthRule(updateRule)
+		pipe.HSet(ctx, ruleKey, authRule.Name, &authRule)
+		return nil
+	})
+
+	return err
+}
+
 //
 //// FindRolesByUser 通过会员id获取关联的所有角色
 //func (rbac *RedisRbac) FindRolesByUser(userId interface{}) ([]*db.AuthItem, error) {
@@ -179,78 +256,223 @@ func (rbac *RedisRbac) GetItem(name string) (*db.AuthItem, error) {
 //	err := rbac.db.Where("user_id = ?", userId).Find(&assignments).Error
 //	return assignments, err
 //}
-//
-//func (rbac *RedisRbac) AddItemChild(itemChild db.AuthItemChild) error {
-//	return rbac.db.Create(&itemChild).Error
+
+func (rbac *RedisRbac) scanItemChild(match string, f func(authItemChild AuthItemChild)) {
+	ctx := context.Background()
+	key := rbac.key(gorbac.GetTableName("item-child"))
+	iter := rbac.rdb.HScan(ctx, key, 0, match, 0).Iterator()
+	for iter.Next(ctx) {
+		ele := AuthItemChild{}
+		if err := ele.UnmarshalBinaryStr(iter.Val()); err == nil {
+			f(ele)
+		}
+	}
+}
+
+func (rbac *RedisRbac) itemChildKey(parent string, child string) string {
+	return fmt.Sprintf("%s::%s", parent, child)
+}
+
+func (rbac *RedisRbac) AddItemChild(itemChild gorbac.ItemChild) error {
+	ctx := context.Background()
+	authItemChild := ToAuthItemChild(itemChild.Parent, itemChild.Child)
+	key := rbac.key(authItemChild.TableName())
+	childKey := rbac.itemChildKey(authItemChild.Parent, authItemChild.Child)
+	return rbac.rdb.HSet(ctx, key, childKey, &authItemChild).Err()
+}
+
+func (rbac *RedisRbac) RemoveChild(parent string, child string) error {
+	ctx := context.Background()
+	key := rbac.key(gorbac.GetTableName("item-child"))
+	childKey := rbac.itemChildKey(parent, child)
+	rbac.rdb.HDel(ctx, key, childKey)
+	return nil
+}
+
+func (rbac *RedisRbac) RemoveChildren(parent string) error {
+	keys := make([]string, 0)
+	rbac.scanItemChild(parent+"::*", func(authItemChild AuthItemChild) {
+		childKey := rbac.itemChildKey(authItemChild.Parent, authItemChild.Child)
+		keys = append(keys, childKey)
+	})
+	if len(keys) > 0 {
+		ctx := context.Background()
+		key := rbac.key(gorbac.GetTableName("item-child"))
+		rbac.rdb.HDel(ctx, key, keys...)
+	}
+	return nil
+}
+
+func (rbac *RedisRbac) HasChild(parent string, child string) bool {
+	ctx := context.Background()
+	key := rbac.key(gorbac.GetTableName("item-child"))
+	childKey := rbac.itemChildKey(parent, child)
+	return rbac.rdb.HExists(ctx, key, childKey).Val()
+}
+
+func (rbac *RedisRbac) FindChildren(name string) ([]gorbac.Item, error) {
+
+	itemExits := make(map[string]bool, 0)
+	rbac.scanItemChild(name+"::*", func(authItemChild AuthItemChild) {
+		itemExits[authItemChild.Child] = true
+	})
+
+	items := make([]gorbac.Item, 0)
+	if len(itemExits) > 0 {
+		rbac.scanItems(func(authItem AuthItem) {
+			if itemExits[authItem.Name] {
+				item := ToItem(authItem)
+				items = append(items, item)
+			}
+		})
+	}
+
+	return items, nil
+}
+
+//func (rbac *RedisRbac) scanAssignment(match string, f func(authAssignment AuthAssignment)) {
+//	ctx := context.Background()
+//	key := rbac.key(gorbac.GetTableName("assignment"))
+//	iter := rbac.rdb.HScan(ctx, key, 0, match, 0).Iterator()
+//	for iter.Next(ctx) {
+//		ele := AuthAssignment{}
+//		if err := ele.UnmarshalBinaryStr(iter.Val()); err == nil {
+//			f(ele)
+//		}
+//	}
 //}
 //
-//func (rbac *RedisRbac) RemoveChild(parent string, child string) error {
-//	var itemChild db.AuthItemChild
-//	return rbac.db.Where("parent = ? and child = ?", parent, child).Delete(&itemChild).Error
+//func (rbac *RedisRbac) assignmentKey(userId interface{}, itemName string) string {
+//	return fmt.Sprintf("%v::%s", userId, itemName)
 //}
-//
-//func (rbac *RedisRbac) RemoveChildren(parent string) error {
-//	var itemChild db.AuthItemChild
-//	return rbac.db.Where("parent = ?", parent).Delete(&itemChild).Error
-//}
-//
-//func (rbac *RedisRbac) HasChild(parent string, child string) bool {
-//	var itemChild db.AuthItemChild
-//	first := rbac.db.Model(&itemChild).Where("parent = ? and child = ?", parent, child).First(&itemChild)
-//	return first.Error == nil
-//}
-//
-//func (rbac *RedisRbac) FindChildren(name string) ([]*db.AuthItem, error) {
-//	var items []*db.AuthItem
-//	item := db.AuthItem{}
-//	err := rbac.db.Model(&item).
-//		Joins(fmt.Sprintf("inner join %s on %s.name = %s.child", db.GetTableName("item-child"), db.GetTableName("item"), db.GetTableName("item-child"))).
-//		Where(fmt.Sprintf("%s.parent = ?", db.GetTableName("item-child")), name).Error
-//	return items, err
-//}
-//
-//func (rbac *RedisRbac) Assign(assignment db.AuthAssignment) error {
-//	return rbac.db.Create(&assignment).Error
-//}
-//
-//func (rbac *RedisRbac) RemoveAssignment(userId interface{}, name string) error {
-//	var assignment db.AuthAssignment
-//	return rbac.db.Where("user_id = ? and item_name = ?", userId, name).Delete(&assignment).Error
-//}
-//
-//func (rbac *RedisRbac) RemoveAllAssignmentByUser(userId interface{}) error {
-//	var assignment db.AuthAssignment
-//	return rbac.db.Where("user_id = ?", userId).Delete(&assignment).Error
-//}
-//
-//func (rbac *RedisRbac) RemoveAllAssignments() error {
-//	var assignment db.AuthAssignment
-//	return rbac.db.Delete(&assignment).Error
-//}
-//
-//func (rbac *RedisRbac) GetAssignment(userId interface{}, name string) (*db.AuthAssignment, error) {
-//	var assignments *db.AuthAssignment
-//	err := rbac.db.Where("user_id = ? and item_name = ?", userId, name).First(assignments).Error
-//	return assignments, err
-//}
-//
-//func (rbac *RedisRbac) GetAssignmentByItems(name string) ([]*db.AuthAssignment, error) {
-//	var assignments []*db.AuthAssignment
-//	err := rbac.db.Where("item_name = ?", name).Find(&assignments).Error
-//	return assignments, err
-//}
-//
-//func (rbac *RedisRbac) GetAssignments(userId interface{}) ([]*db.AuthAssignment, error) {
-//	var assignments []*db.AuthAssignment
-//	err := rbac.db.Where("user_id = ?", userId).Find(&assignments).Error
-//	return assignments, err
-//}
-//
-//func (rbac *RedisRbac) GetAllAssignment() ([]*db.AuthAssignment, error) {
-//	var assignments []*db.AuthAssignment
-//	err := rbac.db.Find(&assignments).Error
-//	return assignments, err
-//}
+
+func (rbac *RedisRbac) Assign(assignment gorbac.Assignment) error {
+	ctx := context.Background()
+	_, err := rbac.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		authAssignment := ToAuthAssignment(assignment)
+		key := rbac.key(authAssignment.TableName())
+		pipe.HSet(ctx, fmt.Sprintf("%s:%v", key, assignment.ItemName), assignment.UserId, &assignment)
+		pipe.SAdd(ctx, fmt.Sprintf("%s-u:%v", key, assignment.UserId), assignment.ItemName)
+		return nil
+	})
+
+	return err
+}
+
+func (rbac *RedisRbac) RemoveAssignment(userId interface{}, name string) error {
+	ctx := context.Background()
+	_, err := rbac.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		key := rbac.key(gorbac.GetTableName("assignment"))
+		pipe.HDel(ctx, fmt.Sprintf("%s:%s", key, name), fmt.Sprintf("%v", userId))
+		pipe.SRem(ctx, fmt.Sprintf("%s-u:%v", key, userId), name)
+		return nil
+	})
+
+	return err
+}
+
+func (rbac *RedisRbac) RemoveAllAssignmentByUser(userId interface{}) error {
+	ctx := context.Background()
+	key := rbac.key(gorbac.GetTableName("assignment"))
+	names := rbac.rdb.SMembers(ctx, fmt.Sprintf("%s-u:%v", key, userId))
+	if names.Err() != nil {
+		return names.Err()
+	}
+	for _, name := range names.Val() {
+		rbac.rdb.HDel(ctx, fmt.Sprintf("%s:%s", key, name), fmt.Sprintf("%v", userId))
+	}
+	return nil
+}
+
+func (rbac *RedisRbac) RemoveAllAssignments() error {
+	ctx := context.Background()
+	key := rbac.key(gorbac.GetTableName("assignment"))
+	iter := rbac.rdb.Scan(ctx, 0, key+"*", 0).Iterator()
+	for iter.Next(ctx) {
+		rbac.rdb.Del(ctx, iter.Val())
+	}
+	return iter.Err()
+}
+
+func (rbac *RedisRbac) GetAssignment(userId interface{}, name string) (*gorbac.Assignment, error) {
+	ctx := context.Background()
+	key := rbac.key(gorbac.GetTableName("assignment"))
+	if rbac.rdb.Exists(ctx, fmt.Sprintf("%s:%s", key, name)).Val() == 0 {
+		return nil, errors.New("assignment not found")
+	}
+	authAssignment := AuthAssignment{}
+	err := rbac.rdb.HGet(ctx, fmt.Sprintf("%s:%s", key, name), fmt.Sprintf("%v", userId)).Scan(&authAssignment)
+	if err != nil {
+		return nil, err
+	} else {
+		assignment := ToAssignment(authAssignment)
+		return assignment, nil
+	}
+}
+
+func (rbac *RedisRbac) GetAssignmentByItems(name string) ([]*gorbac.Assignment, error) {
+	ctx := context.Background()
+	key := rbac.key(gorbac.GetTableName("assignment"))
+	iter := rbac.rdb.Scan(ctx, 0, fmt.Sprintf("%s:%s-*", key, name), 0).Iterator()
+	assignments := make([]*gorbac.Assignment, 0)
+	for iter.Next(ctx) {
+		authAssignment := AuthAssignment{}
+		err := rbac.rdb.HGetAll(ctx, iter.Val()).Scan(&authAssignment)
+		if err == nil {
+			assignment := ToAssignment(authAssignment)
+			assignments = append(assignments, assignment)
+		}
+	}
+
+	if err := iter.Err(); err != nil {
+		return nil, err
+	} else {
+		return assignments, nil
+	}
+}
+
+func (rbac *RedisRbac) GetAssignments(userId interface{}) ([]*gorbac.Assignment, error) {
+	ctx := context.Background()
+	key := rbac.key(gorbac.GetTableName("assignment"))
+	members := rbac.rdb.SMembers(ctx, fmt.Sprintf("%s-u:%v", key, userId))
+	if members.Err() != nil {
+		return nil, members.Err()
+	}
+
+	assignments := make([]*gorbac.Assignment, 0)
+	for _, name := range members.Val() {
+		k := fmt.Sprintf("%s:%s-%v", key, name, userId)
+		authAssignment := AuthAssignment{}
+		err := rbac.rdb.HGetAll(ctx, k).Scan(&authAssignment)
+		if err == nil {
+			assignment := ToAssignment(authAssignment)
+			assignments = append(assignments, assignment)
+		}
+	}
+	return assignments, nil
+}
+
+func (rbac *RedisRbac) GetAllAssignment() ([]*gorbac.Assignment, error) {
+	ctx := context.Background()
+	key := rbac.key(gorbac.GetTableName("assignment"))
+	iter := rbac.rdb.Scan(ctx, 0, fmt.Sprintf("%s:*", key), 0).Iterator()
+	assignments := make([]*gorbac.Assignment, 0)
+	for iter.Next(ctx) {
+		authAssignment := AuthAssignment{}
+		err := rbac.rdb.HGetAll(ctx, iter.Val()).Scan(&authAssignment)
+		if err == nil {
+			assignment := ToAssignment(authAssignment)
+			assignments = append(assignments, assignment)
+		}
+	}
+
+	if err := iter.Err(); err == nil {
+		return assignments, nil
+	} else {
+		return nil, err
+	}
+}
+
 //
 //func (rbac *RedisRbac) RemoveAll() error {
 //	return rbac.db.Transaction(func(tx *gorm.DB) error {
