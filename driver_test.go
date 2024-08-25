@@ -15,7 +15,24 @@ func handle() *gorbac_redis.RedisRbac {
 		Addrs:    []string{"43.139.223.7:8088"},
 		Password: "940430Dex",
 	})
-	return gorbac_redis.NewRedisRbac(rdb, "test")
+	return gorbac_redis.NewRedisRbac(rdb, "TEST0000001")
+}
+
+func TestService(t *testing.T) {
+	service := gorbac.NewRbacService(handle(), false)
+	//service.AddRole("AAA", "", "")
+	//service.AddPermission("BBB", "", "")
+	//err := service.AssignRole("AAA", "BBB")
+	//roles := service.Roles()
+	//logger.Info("------------------", roles, err)
+	//err := service.AssignPermission("BBB", "AAA")
+	//logger.Info("------------------", err)
+	//service.CleanChildren("AAA")
+	//err := service.AssignChildren("AAA", "BBB", "BBB")
+	//flag := service.Assign(123, "AAA")
+	//service.CleanAssigns(123)
+	flag := service.UpdateRole("AAA", "TTT", "teste", "")
+	logger.Info("------------------", flag)
 }
 
 func print(item interface{}) {
@@ -27,28 +44,22 @@ func TestRedis(t *testing.T) {
 	rbac := handle()
 	//ctx := context.Background()
 	//rdb.SAdd(ctx, "aaa", "2324", "32132")
-	//authItem := gorbac_redis.AuthItem{
-	//	Name:        "bbb",
-	//	Type:        0,
-	//	Description: "",
-	//	RuleName:    "",
-	//	ExecuteName: "",
-	//	CreateTime:  time.Now(),
-	//	UpdateTime:  time.Now(),
-	//}
+	//authItem := gorbac_redis.AuthItem{Name: "DDD", Type: 0, Description: "", RuleName: "", ExecuteName: "", CreateTime: time.Now(), UpdateTime: time.Now()}
 	//item := gorbac_redis.ToItem(authItem)
 	//err := rbac.AddItem(item)
 
 	//item, err := rbac.GetItem("bbb")
 
 	//
-	items, err := rbac.GetItems(1)
-	logger.Infof("--------------%v", err)
-	print(items)
+	//items, err := rbac.GetItems(1)
+	//logger.Infof("--------------%v", err)
+	//print(items)
 
 	//items, _ := rbac.FindAllItems()
 	//logger.Infof("============%+v", items)
-
+	//err := rbac.UpdateItem("AAA", gorbac.NewPermission("TTT", "test", "", "", time.Now(), time.Now()))
+	err := rbac.RemoveItem("TTT")
+	logger.Infof("--------------%v", err)
 }
 
 func TestRules(t *testing.T) {
@@ -79,9 +90,9 @@ func TestRules(t *testing.T) {
 
 func TestChildren(t *testing.T) {
 	rbac := handle()
-	//_ = rbac.AddItemChild(gorbac.ItemChild{"AAA", "BBB"})
-	//_ = rbac.AddItemChild(gorbac.ItemChild{"AAA", "CCC"})
-	//_ = rbac.AddItemChild(gorbac.ItemChild{"AAA", "DDD"})
+	_ = rbac.AddItemChild(gorbac.ItemChild{"TTT", "BBB"})
+	_ = rbac.AddItemChild(gorbac.ItemChild{"TTT", "CCC"})
+	_ = rbac.AddItemChild(gorbac.ItemChild{"DDD", "TTT"})
 	//rbac.RemoveChild("AAA", "CCC")
 	//rbac.RemoveChildren("AAA")
 	//logger.Infof("----------%v", rbac.HasChild("AAA", "BBB"))
@@ -97,16 +108,24 @@ func TestChildren(t *testing.T) {
 
 func TestRedisRbac_GetAssignment(t *testing.T) {
 	rbac := handle()
-	//assignment := gorbac.AuthAssignment{
-	//	ItemName:   "bbb",
-	//	UserId:     10000,
-	//	CreateTime: time.Now(),
-	//}
-	//rbac.Assign(assignment)
-	//assignment, err := rbac.GetAssignment(10000, "bbb")
-	rbac.RemoveAllAssignments()
+	rbac.Assign(*gorbac.NewAssignment(123, "AAA"))
+	rbac.Assign(*gorbac.NewAssignment(123, "BBB"))
+	rbac.Assign(*gorbac.NewAssignment(124, "BBB"))
+	//rbac.RemoveAssignment(123, "AAA")
+	//rbac.RemoveAllAssignmentByUser(123)
+	//rbac.RemoveAllAssignments()
+	//assignment, _ := rbac.GetAssignment(123, "BBB")
+	//items, _ := rbac.GetAssignmentByItems("BBB")
+	//assignments, _ := rbac.GetAssignments(124)
+	assignments, _ := rbac.GetAllAssignment()
+	print(assignments)
+}
 
-	//logger.Infof("-------------%v", err)
-	//data, _ := json.Marshal(assignment)
-	//logger.Infof("=============%v", string(data))
+func TestUser(t *testing.T) {
+	rbac := handle()
+	//user, err := rbac.FindPermissionsByUser(124)
+	//list, err := rbac.FindChildrenList()
+	list, err := rbac.GetItemList(2, []string{"CCC"})
+	logger.Infof("--------------%v", err)
+	print(list)
 }
