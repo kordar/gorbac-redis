@@ -129,3 +129,34 @@ func TestUser(t *testing.T) {
 	logger.Infof("--------------%v", err)
 	print(list)
 }
+
+func TestManager(t *testing.T) {
+	service := gorbac.NewRbacService(handle(), false)
+	manager := service.GetAuthManager()
+	role := gorbac.NewRole("guest", "guest", "", "", time.Now(), time.Now())
+	p1 := gorbac.NewPermission("AAA", "", "demo", "demo", time.Now(), time.Now())
+	p2 := gorbac.NewPermission("BBB", "", "", "", time.Now(), time.Now())
+	p3 := gorbac.NewPermission("CCC", "", "", "", time.Now(), time.Now())
+	manager.Add(role)
+	manager.Add(p1)
+	manager.Add(p2)
+	manager.Add(p3)
+	manager.AddChild(role, p1)
+	manager.AddChild(role, p2)
+	manager.AddChild(role, p3)
+	admin := manager.CreateRole("admin")
+	manager.Add(admin)
+	manager.AddChild(admin, role)
+	err := manager.AddChild(role, admin)
+	logger.Errorf("xxxxxxxxx%v", err)
+	//manager.SetDefaultRoles(role)
+
+	gorbac.ExecuteManager.AddExecutor(&gorbac.DemoExecutor{})
+
+	//manager.Assign(role, 213)
+
+	//manager.RemoveAllAssignmentByUser(213)
+
+	access := manager.CheckAccess(nil, 213, "AAA")
+	logger.Infof("=================%v", access)
+}
