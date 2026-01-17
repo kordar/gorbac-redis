@@ -423,6 +423,23 @@ func (rbac *RedisRbac) Assign(assignment gorbac.Assignment) error {
 	return err
 }
 
+func (rbac *RedisRbac) Assigns(assignments ...*gorbac.Assignment) error {
+    if len(assignments) == 0 {
+        return nil
+    }
+
+    ctx := context.Background()
+    _, err := rbac.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+        for _, a := range assignments {
+            pipe.SAdd(ctx, rbac.assigmentUserKey(a.UserId), a.ItemName)
+            pipe.SAdd(ctx, rbac.assigmentNameKey(a.ItemName), a.UserId)
+        }
+        return nil
+    })
+    return err
+}
+
+
 func (rbac *RedisRbac) RemoveAssignment(userId interface{}, name string) error {
 	ctx := context.Background()
 	if rbac.rdb.SIsMember(ctx, rbac.assigmentUserKey(userId), name).Val() {
