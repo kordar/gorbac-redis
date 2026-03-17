@@ -25,7 +25,7 @@ go get github.com/kordar/gorbac-redis
 
 依赖：
 
-- Go 1.20+
+- Go 1.18+
 - [github.com/kordar/gorbac](https://github.com/kordar/gorbac)
 - [github.com/redis/go-redis/v9](https://github.com/redis/go-redis)
 
@@ -125,7 +125,7 @@ func main() {
 
 ## 作为 CacheStore 使用（可选）
 
-如果你的核心库 gorbac 开启了进程内缓存，同时希望在多实例间共享 RBAC 快照（items/rules/parents），可以将本仓库提供的 `RedisCacheStore` 注入到 gorbac：
+如果你的核心库 gorbac 开启了进程内缓存，同时希望在多实例间共享 RBAC 快照（items/rules/parents），可以使用独立仓库 `gorbac-cache-redis` 提供的 `RedisCacheStore` 注入到 gorbac：
 
 ```go
 package main
@@ -134,14 +134,14 @@ import (
     "time"
 
     "github.com/kordar/gorbac"
-    gorbac_redis "github.com/kordar/gorbac-redis"
+    gorbac_cache_redis "github.com/kordar/gorbac-cache-redis"
     "github.com/redis/go-redis/v9"
 )
 
 func main() {
     repo := NewYourAuthRepository()
     rdb := redis.NewClient(&redis.Options{ Addr: "127.0.0.1:6379" })
-    store := gorbac_redis.NewRedisCacheStore(rdb)
+    store := gorbac_cache_redis.NewRedisCacheStore(rdb)
 
     service := gorbac.NewRbacServiceWithCacheStore(
         repo,

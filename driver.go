@@ -36,30 +36,41 @@ func (rbac *RedisRbac) AddItem(item gorbac.Item) error {
 	return rbac.rdb.HSet(ctx, key, item.GetName(), &authItem).Err()
 }
 
+func (rbac *RedisRbac) hscanEachValue(ctx context.Context, key string, match string, count int64, f func(value string)) error {
+	var cursor uint64
+	for {
+		pairs, next, err := rbac.rdb.HScan(ctx, key, cursor, match, count).Result()
+		if err != nil {
+			return err
+		}
+
+		for i := 1; i < len(pairs); i += 2 {
+			f(pairs[i])
+		}
+
+		cursor = next
+		if cursor == 0 {
+			return nil
+		}
+	}
+}
+
 func (rbac *RedisRbac) scanFilterItems(t int32, f func(authItem AuthItem)) {
 	ctx := context.Background()
 	key := rbac.key(gorbac.GetTableName("item"))
-	iter := rbac.rdb.HScan(ctx, key, 0, "*", 0).Iterator()
-	isField := true
-	for iter.Next(ctx) {
-		if isField {
-			isField = false
-			continue
-		}
-		isField = true
+	_ = rbac.hscanEachValue(ctx, key, "*", 0, func(value string) {
 		element := AuthItem{}
-		if err := element.UnmarshalBinaryStr(iter.Val()); err != nil {
-			continue
+		if err := element.UnmarshalBinaryStr(value); err != nil {
+			return
 		}
 		if t == gorbac.NoneType.Value() {
 			f(element)
-			continue
+			return
 		}
 		if (t == gorbac.RoleType.Value() || t == gorbac.PermissionType.Value()) && t == element.Type {
 			f(element)
 		}
-	}
-	_ = iter.Err()
+	})
 }
 
 func (rbac *RedisRbac) GetItem(name string) (gorbac.Item, error) {
@@ -86,12 +97,6 @@ func (rbac *RedisRbac) GetItemsByType(itemType gorbac.ItemType) ([]gorbac.Item, 
 
 func (rbac *RedisRbac) FindAllItems() ([]gorbac.Item, error) {
 	return rbac.GetItemsByType(gorbac.NoneType)
-}
-
-func (rbac *RedisRbac) cleanItems() {
-	rbac.scanFilterItems(gorbac.NoneType.Value(), func(authItem AuthItem) {
-		_ = rbac.RemoveItem(authItem.Name)
-	})
 }
 
 func (rbac *RedisRbac) RemoveItem(name string) error {
@@ -140,52 +145,77 @@ func (rbac *RedisRbac) UpdateItem(itemName string, updateItem gorbac.Item) error
 	if itemName != updateItem.GetName() {
 		// 校验更新待更新的item是否已存在
 		if rbac.rdb.HExists(ctx, itemKey, updateItem.GetName()).Val() {
-			return errors.New(fmt.Sprintf("item `%s` already exists", updateItem.GetName()))
+			return fmt.Errorf("item `%s` already exists", updateItem.GetName())
 		}
 
 		itemChildKey := rbac.key(gorbac.GetTableName("item-child"))
 		removeIds := make([]string, 0)
+		var childErr error
 		rbac.scanItemChild(itemName+"::*", func(authItemChild AuthItemChild) {
+			if childErr != nil {
+				return
+			}
 			removeIds = append(removeIds, rbac.itemChildKey(authItemChild.Parent, authItemChild.Child))
-			_ = rbac.AddItemChild(gorbac.ItemChild{Parent: updateItem.GetName(), Child: authItemChild.Child})
+			childErr = rbac.AddItemChild(gorbac.ItemChild{Parent: updateItem.GetName(), Child: authItemChild.Child})
 		})
+		if childErr != nil {
+			return childErr
+		}
 
 		if len(removeIds) > 0 {
-			rbac.rdb.HDel(ctx, itemChildKey, removeIds...)
+			if err := rbac.rdb.HDel(ctx, itemChildKey, removeIds...).Err(); err != nil {
+				return err
+			}
 		}
 		//
 		removeIds = removeIds[:0]
+		childErr = nil
 		rbac.scanItemChild("*::"+itemName, func(authItemChild AuthItemChild) {
+			if childErr != nil {
+				return
+			}
 			removeIds = append(removeIds, rbac.itemChildKey(authItemChild.Parent, authItemChild.Child))
-			_ = rbac.AddItemChild(gorbac.ItemChild{Parent: authItemChild.Parent, Child: updateItem.GetName()})
+			childErr = rbac.AddItemChild(gorbac.ItemChild{Parent: authItemChild.Parent, Child: updateItem.GetName()})
 		})
+		if childErr != nil {
+			return childErr
+		}
 
 		if len(removeIds) > 0 {
-			rbac.rdb.HDel(ctx, itemChildKey, removeIds...)
+			if err := rbac.rdb.HDel(ctx, itemChildKey, removeIds...).Err(); err != nil {
+				return err
+			}
 		}
 
 		assigmentNameKey := rbac.assigmentNameKey(itemName)
 		iter := rbac.rdb.SScan(ctx, assigmentNameKey, 0, "*", 0).Iterator()
 		for iter.Next(ctx) {
-			_, _ = rbac.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			_, err := rbac.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 				assigmentUserKey := rbac.assigmentUserKey(iter.Val())
 				pipe.SRem(ctx, assigmentUserKey, itemName)
 				pipe.SAdd(ctx, assigmentUserKey, updateItem.GetName())
 				return nil
 			})
+			if err != nil {
+				return err
+			}
+		}
+		if err := iter.Err(); err != nil {
+			return err
 		}
 
 		targetAssigmentNameKey := rbac.assigmentNameKey(updateItem.GetName())
 		_ = rbac.rdb.Rename(ctx, assigmentNameKey, targetAssigmentNameKey).Err()
 
-		rbac.rdb.HDel(ctx, itemKey, itemName)
+		if err := rbac.rdb.HDel(ctx, itemKey, itemName).Err(); err != nil {
+			return err
+		}
 	}
 
 	authItem := ToAuthItem(updateItem)
 	authItem.UpdateTime = time.Now()
 
-	rbac.rdb.HSet(ctx, itemKey, authItem.Name, &authItem)
-	return nil
+	return rbac.rdb.HSet(ctx, itemKey, authItem.Name, &authItem).Err()
 }
 
 func (rbac *RedisRbac) AddRule(rule gorbac.Rule) error {
@@ -211,21 +241,13 @@ func (rbac *RedisRbac) GetRule(name string) (*gorbac.Rule, error) {
 func (rbac *RedisRbac) scanRules(f func(authRule AuthRule)) {
 	ctx := context.Background()
 	key := rbac.key(gorbac.GetTableName("rule"))
-	iter := rbac.rdb.HScan(ctx, key, 0, "*", 0).Iterator()
-	isField := true
-	for iter.Next(ctx) {
-		if isField {
-			isField = false
-			continue
-		}
-		isField = true
+	_ = rbac.hscanEachValue(ctx, key, "*", 0, func(value string) {
 		ele := AuthRule{}
-		if err := ele.UnmarshalBinaryStr(iter.Val()); err != nil {
-			continue
+		if err := ele.UnmarshalBinaryStr(value); err != nil {
+			return
 		}
 		f(ele)
-	}
-	_ = iter.Err()
+	})
 }
 
 func (rbac *RedisRbac) GetRules() ([]*gorbac.Rule, error) {
@@ -246,12 +268,11 @@ func (rbac *RedisRbac) RemoveRule(ruleName string) error {
 		}
 		authItem.RuleName = ""
 		authItem.UpdateTime = time.Now()
-		rbac.rdb.HSet(ctx, itemKey, authItem.Name, &authItem)
+		_ = rbac.rdb.HSet(ctx, itemKey, authItem.Name, &authItem).Err()
 	})
 
 	ruleKey := rbac.key(gorbac.GetTableName("rule"))
-	rbac.rdb.HDel(ctx, ruleKey, ruleName)
-	return nil
+	return rbac.rdb.HDel(ctx, ruleKey, ruleName).Err()
 }
 
 func (rbac *RedisRbac) UpdateRule(ruleName string, updateRule gorbac.Rule) error {
@@ -260,7 +281,7 @@ func (rbac *RedisRbac) UpdateRule(ruleName string, updateRule gorbac.Rule) error
 	if ruleName != updateRule.Name {
 		// 校验更新待更新的rule是否已存在
 		if rbac.rdb.HExists(ctx, ruleKey, updateRule.Name).Val() {
-			return errors.New(fmt.Sprintf("rule `%s` already exists", updateRule.Name))
+			return fmt.Errorf("rule `%s` already exists", updateRule.Name)
 		}
 
 		itemKey := rbac.key(gorbac.GetTableName("item"))
@@ -270,7 +291,7 @@ func (rbac *RedisRbac) UpdateRule(ruleName string, updateRule gorbac.Rule) error
 			}
 			authItem.RuleName = updateRule.Name
 			authItem.UpdateTime = time.Now()
-			rbac.rdb.HSet(ctx, itemKey, authItem.Name, &authItem)
+			_ = rbac.rdb.HSet(ctx, itemKey, authItem.Name, &authItem).Err()
 		})
 	}
 
@@ -287,21 +308,13 @@ func (rbac *RedisRbac) UpdateRule(ruleName string, updateRule gorbac.Rule) error
 func (rbac *RedisRbac) scanItemChild(match string, f func(authItemChild AuthItemChild)) {
 	ctx := context.Background()
 	key := rbac.key(gorbac.GetTableName("item-child"))
-	iter := rbac.rdb.HScan(ctx, key, 0, match, 0).Iterator()
-	isField := true
-	for iter.Next(ctx) {
-		if isField {
-			isField = false
-			continue
-		}
-		isField = true
+	_ = rbac.hscanEachValue(ctx, key, match, 0, func(value string) {
 		ele := AuthItemChild{}
-		if err := ele.UnmarshalBinaryStr(iter.Val()); err != nil {
-			continue
+		if err := ele.UnmarshalBinaryStr(value); err != nil {
+			return
 		}
 		f(ele)
-	}
-	_ = iter.Err()
+	})
 }
 
 func (rbac *RedisRbac) itemChildKey(parent string, child string) string {
@@ -324,7 +337,7 @@ func (rbac *RedisRbac) RemoveChild(parent string, child string) error {
 }
 
 func (rbac *RedisRbac) RemoveChildParentByNames(names []string) error {
-	if names != nil && len(names) > 0 {
+	if len(names) > 0 {
 		removeIds := make([]string, 0)
 		for _, name := range names {
 			rbac.scanItemChild(name+"::*", func(authItemChild AuthItemChild) {
@@ -334,14 +347,14 @@ func (rbac *RedisRbac) RemoveChildParentByNames(names []string) error {
 		if len(removeIds) > 0 {
 			ctx := context.Background()
 			key := rbac.key(gorbac.GetTableName("item-child"))
-			rbac.rdb.HDel(ctx, key, removeIds...)
+			return rbac.rdb.HDel(ctx, key, removeIds...).Err()
 		}
 	}
 	return nil
 }
 
 func (rbac *RedisRbac) RemoveChildChildByNames(names []string) error {
-	if names != nil && len(names) > 0 {
+	if len(names) > 0 {
 		removeIds := make([]string, 0)
 		for _, name := range names {
 			rbac.scanItemChild("*::"+name, func(authItemChild AuthItemChild) {
@@ -351,7 +364,7 @@ func (rbac *RedisRbac) RemoveChildChildByNames(names []string) error {
 		if len(removeIds) > 0 {
 			ctx := context.Background()
 			key := rbac.key(gorbac.GetTableName("item-child"))
-			rbac.rdb.HDel(ctx, key, removeIds...)
+			return rbac.rdb.HDel(ctx, key, removeIds...).Err()
 		}
 	}
 	return nil
@@ -372,7 +385,7 @@ func (rbac *RedisRbac) RemoveItemByType(itemType gorbac.ItemType) error {
 	})
 	if len(removeIds) > 0 {
 		ctx := context.Background()
-		rbac.rdb.HDel(ctx, rbac.key(gorbac.GetTableName("item")), removeIds...)
+		return rbac.rdb.HDel(ctx, rbac.key(gorbac.GetTableName("item")), removeIds...).Err()
 	}
 	return nil
 }
@@ -386,7 +399,7 @@ func (rbac *RedisRbac) RemoveChildren(parent string) error {
 	if len(keys) > 0 {
 		ctx := context.Background()
 		key := rbac.key(gorbac.GetTableName("item-child"))
-		rbac.rdb.HDel(ctx, key, keys...)
+		return rbac.rdb.HDel(ctx, key, keys...).Err()
 	}
 	return nil
 }
@@ -476,29 +489,37 @@ func (rbac *RedisRbac) Assigns(assignments ...*gorbac.Assignment) error {
 func (rbac *RedisRbac) RemoveAssignment(userId interface{}, name string) error {
 	ctx := context.Background()
 	if rbac.rdb.SIsMember(ctx, rbac.assigmentUserKey(userId), name).Val() {
-		_, _ = rbac.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		_, err := rbac.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			pipe.SRem(ctx, rbac.assigmentUserKey(userId), name)
 			pipe.SRem(ctx, rbac.assigmentNameKey(name), userId)
 			return nil
 		})
+		return err
 	}
 	return nil
 }
 
-func (rbac *RedisRbac) removeAssignmentByName(name string) {
+func (rbac *RedisRbac) removeAssignmentByName(name string) error {
 	ctx := context.Background()
 	iter := rbac.rdb.SScan(ctx, rbac.assigmentNameKey(name), 0, "*", 0).Iterator()
 	for iter.Next(ctx) {
 		userId := iter.Val()
-		rbac.rdb.SRem(ctx, rbac.assigmentUserKey(userId), name)
+		if err := rbac.rdb.SRem(ctx, rbac.assigmentUserKey(userId), name).Err(); err != nil {
+			return err
+		}
 	}
-	rbac.rdb.Del(ctx, rbac.assigmentNameKey(name))
+	if err := iter.Err(); err != nil {
+		return err
+	}
+	return rbac.rdb.Del(ctx, rbac.assigmentNameKey(name)).Err()
 }
 
 func (rbac *RedisRbac) RemoveAssignmentByNames(names []string) error {
-	if names != nil && len(names) > 0 {
+	if len(names) > 0 {
 		for _, name := range names {
-			rbac.removeAssignmentByName(name)
+			if err := rbac.removeAssignmentByName(name); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -509,10 +530,14 @@ func (rbac *RedisRbac) RemoveAllAssignmentByUser(userId interface{}) error {
 	iter := rbac.rdb.SScan(ctx, rbac.assigmentUserKey(userId), 0, "*", 0).Iterator()
 	for iter.Next(ctx) {
 		name := iter.Val()
-		rbac.rdb.SRem(ctx, rbac.assigmentNameKey(name), userId)
+		if err := rbac.rdb.SRem(ctx, rbac.assigmentNameKey(name), userId).Err(); err != nil {
+			return err
+		}
 	}
-	rbac.rdb.Del(ctx, rbac.assigmentUserKey(userId))
-	return nil
+	if err := iter.Err(); err != nil {
+		return err
+	}
+	return rbac.rdb.Del(ctx, rbac.assigmentUserKey(userId)).Err()
 }
 
 func (rbac *RedisRbac) RemoveAllAssignments() error {
@@ -520,7 +545,9 @@ func (rbac *RedisRbac) RemoveAllAssignments() error {
 	key := rbac.key(gorbac.GetTableName("assignment"))
 	iter := rbac.rdb.Scan(ctx, 0, key+"-*", 0).Iterator()
 	for iter.Next(ctx) {
-		rbac.rdb.Del(ctx, iter.Val())
+		if err := rbac.rdb.Del(ctx, iter.Val()).Err(); err != nil {
+			return err
+		}
 	}
 	return iter.Err()
 }
@@ -546,6 +573,9 @@ func (rbac *RedisRbac) GetAssignmentsByItem(name string) ([]*gorbac.Assignment, 
 		assignment := gorbac.NewAssignment(iter.Val(), name)
 		assignments = append(assignments, assignment)
 	}
+	if err := iter.Err(); err != nil {
+		return nil, err
+	}
 	return assignments, nil
 }
 
@@ -557,6 +587,9 @@ func (rbac *RedisRbac) GetAssignments(userId interface{}) ([]*gorbac.Assignment,
 		assignment := gorbac.NewAssignment(userId, iter.Val())
 		assignments = append(assignments, assignment)
 	}
+	if err := iter.Err(); err != nil {
+		return nil, err
+	}
 	return assignments, nil
 }
 
@@ -567,9 +600,14 @@ func (rbac *RedisRbac) GetAllAssignment() ([]*gorbac.Assignment, error) {
 	assignments := make([]*gorbac.Assignment, 0)
 	for iter.Next(ctx) {
 		name := strings.Replace(iter.Val(), fmt.Sprintf("%s-n:", key), "", 1)
-		if items, err := rbac.GetAssignmentsByItem(name); err == nil {
-			assignments = append(assignments, items...)
+		items, err := rbac.GetAssignmentsByItem(name)
+		if err != nil {
+			return nil, err
 		}
+		assignments = append(assignments, items...)
+	}
+	if err := iter.Err(); err != nil {
+		return nil, err
 	}
 	return assignments, nil
 }
@@ -580,7 +618,7 @@ func (rbac *RedisRbac) findItemsByUser(userId interface{}, t int32) ([]gorbac.It
 	itemFields := rbac.rdb.SMembers(ctx, assigmentUserKey).Val()
 
 	items := make([]gorbac.Item, 0)
-	if itemFields != nil && len(itemFields) > 0 {
+	if len(itemFields) > 0 {
 		itemKey := rbac.key(gorbac.GetTableName("item"))
 		values := rbac.rdb.HMGet(ctx, itemKey, itemFields...).Val()
 		for _, value := range values {
@@ -641,25 +679,43 @@ func (rbac *RedisRbac) FindPermissionsByUser(userId interface{}) ([]gorbac.Item,
 }
 
 func (rbac *RedisRbac) RemoveAll() error {
-	rbac.cleanItems()
-	rbac.cleanRules()
-	return nil
+	if err := rbac.cleanItems(); err != nil {
+		return err
+	}
+	return rbac.cleanRules()
 }
 
-func (rbac *RedisRbac) cleanRules() {
+func (rbac *RedisRbac) cleanItems() error {
+	var firstErr error
+	rbac.scanFilterItems(gorbac.NoneType.Value(), func(authItem AuthItem) {
+		if firstErr != nil {
+			return
+		}
+		firstErr = rbac.RemoveItem(authItem.Name)
+	})
+	return firstErr
+}
+
+func (rbac *RedisRbac) cleanRules() error {
 	ctx := context.Background()
 	ruleKey := rbac.key(gorbac.GetTableName("rule"))
-	rbac.rdb.Del(ctx, ruleKey)
+	return rbac.rdb.Del(ctx, ruleKey).Err()
 }
 
 func (rbac *RedisRbac) RemoveAllRules() error {
 	ctx := context.Background()
 	itemKey := rbac.key(gorbac.GetTableName("item"))
+	var firstErr error
 	rbac.scanFilterItems(gorbac.NoneType.Value(), func(authItem AuthItem) {
+		if firstErr != nil {
+			return
+		}
 		authItem.RuleName = ""
 		authItem.UpdateTime = time.Now()
-		rbac.rdb.HSet(ctx, itemKey, authItem.Name, &authItem)
+		firstErr = rbac.rdb.HSet(ctx, itemKey, authItem.Name, &authItem).Err()
 	})
-	rbac.cleanRules()
-	return nil
+	if firstErr != nil {
+		return firstErr
+	}
+	return rbac.cleanRules()
 }
