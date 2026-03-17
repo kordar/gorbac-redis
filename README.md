@@ -42,7 +42,7 @@ import (
     "time"
 
     "github.com/kordar/gorbac"
-    "github.com/kordar/gorbac_redis"
+    gorbac_redis "github.com/kordar/gorbac-redis"
     "github.com/redis/go-redis/v9"
 )
 
@@ -122,6 +122,70 @@ func main() {
 数据存储均为 Redis Hash 或 Set 结构，支持快速扫描与批量操作。
 
 ------
+
+## 作为 CacheStore 使用（可选）
+
+如果你的核心库 gorbac 开启了进程内缓存，同时希望在多实例间共享 RBAC 快照（items/rules/parents），可以将本仓库提供的 `RedisCacheStore` 注入到 gorbac：
+
+```go
+package main
+
+import (
+    "time"
+
+    "github.com/kordar/gorbac"
+    gorbac_redis "github.com/kordar/gorbac-redis"
+    "github.com/redis/go-redis/v9"
+)
+
+func main() {
+    repo := NewYourAuthRepository()
+    rdb := redis.NewClient(&redis.Options{ Addr: "127.0.0.1:6379" })
+    store := gorbac_redis.NewRedisCacheStore(rdb)
+
+    service := gorbac.NewRbacServiceWithCacheStore(
+        repo,
+        true,          // 开启进程内缓存
+        store,         // Redis 快照存储
+        "myapp",       // key 前缀
+        10*time.Minute // 快照 TTL
+    )
+    _ = service
+}
+```
+
+键示例：`myapp:rbac:snapshot`。
+
+------
+
+## 连接模式示例
+
+- 单机：
+```go
+redis.NewClient(&redis.Options{ Addr: "127.0.0.1:6379" })
+```
+- 哨兵：
+```go
+redis.NewFailoverClient(&redis.FailoverOptions{
+    MasterName: "mymaster",
+    SentinelAddrs: []string{"10.0.0.1:26379","10.0.0.2:26379"},
+})
+```
+- 集群（推荐 UniversalClient）：
+```go
+redis.NewClusterClient(&redis.ClusterOptions{
+    Addrs: []string{"10.0.0.1:6379","10.0.0.2:6379","10.0.0.3:6379"},
+})
+```
+
+------
+
+## 测试说明
+
+仓库内的集成测试会在未设置环境变量时跳过，避免连接真实 Redis：
+- `RBAC_REDIS_ADDRS`：多个地址用`,`分隔
+- `RBAC_REDIS_PASSWORD`：密码，可选
+- `RBAC_REDIS_TABLE`：表前缀，默认 `RBAC_TEST`
 
 ## License
 

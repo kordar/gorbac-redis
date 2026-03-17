@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/kordar/gorbac"
-	"github.com/redis/go-redis/v9"
 	"strings"
 	"time"
+
+	"github.com/kordar/gorbac"
+	"github.com/redis/go-redis/v9"
 )
 
 type RedisRbac struct {
@@ -39,16 +40,26 @@ func (rbac *RedisRbac) scanFilterItems(t int32, f func(authItem AuthItem)) {
 	ctx := context.Background()
 	key := rbac.key(gorbac.GetTableName("item"))
 	iter := rbac.rdb.HScan(ctx, key, 0, "*", 0).Iterator()
+	isField := true
 	for iter.Next(ctx) {
+		if isField {
+			isField = false
+			continue
+		}
+		isField = true
 		element := AuthItem{}
-		if err := element.UnmarshalBinaryStr(iter.Val()); err == nil {
-			if t == gorbac.NoneType.Value() {
-				f(element)
-			} else if (t == gorbac.RoleType.Value() || t == gorbac.PermissionType.Value()) && t == element.Type {
-				f(element)
-			}
+		if err := element.UnmarshalBinaryStr(iter.Val()); err != nil {
+			continue
+		}
+		if t == gorbac.NoneType.Value() {
+			f(element)
+			continue
+		}
+		if (t == gorbac.RoleType.Value() || t == gorbac.PermissionType.Value()) && t == element.Type {
+			f(element)
 		}
 	}
+	_ = iter.Err()
 }
 
 func (rbac *RedisRbac) GetItem(name string) (gorbac.Item, error) {
@@ -96,7 +107,9 @@ func (rbac *RedisRbac) RemoveItem(name string) error {
 		removeIds = append(removeIds, rbac.itemChildKey(authItemChild.Parent, authItemChild.Child))
 	})
 	if len(removeIds) > 0 {
-		rbac.rdb.HDel(ctx, itemChildKey, removeIds...)
+		if err := rbac.rdb.HDel(ctx, itemChildKey, removeIds...).Err(); err != nil {
+			return err
+		}
 	}
 
 	// 将所有assignment关联的itemName清除
@@ -104,13 +117,19 @@ func (rbac *RedisRbac) RemoveItem(name string) error {
 	iter := rbac.rdb.SScan(ctx, assigmentNameKey, 0, "*", 0).Iterator()
 	for iter.Next(ctx) {
 		assigmentUserKey := rbac.assigmentUserKey(iter.Val())
-		rbac.rdb.SRem(ctx, assigmentUserKey, name)
+		if err := rbac.rdb.SRem(ctx, assigmentUserKey, name).Err(); err != nil {
+			return err
+		}
 	}
-	rbac.rdb.Del(ctx, assigmentNameKey)
+	if err := rbac.rdb.Del(ctx, assigmentNameKey).Err(); err != nil {
+		return err
+	}
 
 	// 移除item
 	itemKey := rbac.key(gorbac.GetTableName("item"))
-	_ = rbac.rdb.HDel(ctx, itemKey, name)
+	if err := rbac.rdb.HDel(ctx, itemKey, name).Err(); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -157,7 +176,7 @@ func (rbac *RedisRbac) UpdateItem(itemName string, updateItem gorbac.Item) error
 		}
 
 		targetAssigmentNameKey := rbac.assigmentNameKey(updateItem.GetName())
-		rbac.rdb.Rename(ctx, assigmentNameKey, targetAssigmentNameKey)
+		_ = rbac.rdb.Rename(ctx, assigmentNameKey, targetAssigmentNameKey).Err()
 
 		rbac.rdb.HDel(ctx, itemKey, itemName)
 	}
@@ -193,12 +212,20 @@ func (rbac *RedisRbac) scanRules(f func(authRule AuthRule)) {
 	ctx := context.Background()
 	key := rbac.key(gorbac.GetTableName("rule"))
 	iter := rbac.rdb.HScan(ctx, key, 0, "*", 0).Iterator()
+	isField := true
 	for iter.Next(ctx) {
-		ele := AuthRule{}
-		if err := ele.UnmarshalBinaryStr(iter.Val()); err == nil {
-			f(ele)
+		if isField {
+			isField = false
+			continue
 		}
+		isField = true
+		ele := AuthRule{}
+		if err := ele.UnmarshalBinaryStr(iter.Val()); err != nil {
+			continue
+		}
+		f(ele)
 	}
+	_ = iter.Err()
 }
 
 func (rbac *RedisRbac) GetRules() ([]*gorbac.Rule, error) {
@@ -261,12 +288,20 @@ func (rbac *RedisRbac) scanItemChild(match string, f func(authItemChild AuthItem
 	ctx := context.Background()
 	key := rbac.key(gorbac.GetTableName("item-child"))
 	iter := rbac.rdb.HScan(ctx, key, 0, match, 0).Iterator()
+	isField := true
 	for iter.Next(ctx) {
-		ele := AuthItemChild{}
-		if err := ele.UnmarshalBinaryStr(iter.Val()); err == nil {
-			f(ele)
+		if isField {
+			isField = false
+			continue
 		}
+		isField = true
+		ele := AuthItemChild{}
+		if err := ele.UnmarshalBinaryStr(iter.Val()); err != nil {
+			continue
+		}
+		f(ele)
 	}
+	_ = iter.Err()
 }
 
 func (rbac *RedisRbac) itemChildKey(parent string, child string) string {
@@ -285,8 +320,7 @@ func (rbac *RedisRbac) RemoveChild(parent string, child string) error {
 	ctx := context.Background()
 	key := rbac.key(gorbac.GetTableName("item-child"))
 	childKey := rbac.itemChildKey(parent, child)
-	rbac.rdb.HDel(ctx, key, childKey)
-	return nil
+	return rbac.rdb.HDel(ctx, key, childKey).Err()
 }
 
 func (rbac *RedisRbac) RemoveChildParentByNames(names []string) error {
@@ -424,21 +458,20 @@ func (rbac *RedisRbac) Assign(assignment gorbac.Assignment) error {
 }
 
 func (rbac *RedisRbac) Assigns(assignments ...*gorbac.Assignment) error {
-    if len(assignments) == 0 {
-        return nil
-    }
+	if len(assignments) == 0 {
+		return nil
+	}
 
-    ctx := context.Background()
-    _, err := rbac.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-        for _, a := range assignments {
-            pipe.SAdd(ctx, rbac.assigmentUserKey(a.UserId), a.ItemName)
-            pipe.SAdd(ctx, rbac.assigmentNameKey(a.ItemName), a.UserId)
-        }
-        return nil
-    })
-    return err
+	ctx := context.Background()
+	_, err := rbac.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for _, a := range assignments {
+			pipe.SAdd(ctx, rbac.assigmentUserKey(a.UserId), a.ItemName)
+			pipe.SAdd(ctx, rbac.assigmentNameKey(a.ItemName), a.UserId)
+		}
+		return nil
+	})
+	return err
 }
-
 
 func (rbac *RedisRbac) RemoveAssignment(userId interface{}, name string) error {
 	ctx := context.Background()
@@ -552,7 +585,14 @@ func (rbac *RedisRbac) findItemsByUser(userId interface{}, t int32) ([]gorbac.It
 		values := rbac.rdb.HMGet(ctx, itemKey, itemFields...).Val()
 		for _, value := range values {
 			authItem := AuthItem{}
-			if err := authItem.UnmarshalBinaryStr(value.(string)); err == nil {
+			if value == nil {
+				continue
+			}
+			str, ok := value.(string)
+			if !ok {
+				continue
+			}
+			if err := authItem.UnmarshalBinaryStr(str); err == nil {
 				if authItem.Type != t {
 					continue
 				}
@@ -577,7 +617,14 @@ func (rbac *RedisRbac) GetItemList(t int32, names []string) ([]gorbac.Item, erro
 	values := rbac.rdb.HMGet(ctx, itemKey, names...).Val()
 	for _, value := range values {
 		authItem := AuthItem{}
-		if err := authItem.UnmarshalBinaryStr(value.(string)); err == nil {
+		if value == nil {
+			continue
+		}
+		str, ok := value.(string)
+		if !ok {
+			continue
+		}
+		if err := authItem.UnmarshalBinaryStr(str); err == nil {
 			if authItem.Type != t {
 				continue
 			}

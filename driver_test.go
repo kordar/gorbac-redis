@@ -2,24 +2,39 @@ package gorbac_redis_test
 
 import (
 	"encoding/json"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
 	logger "github.com/kordar/gologger"
 	"github.com/kordar/gorbac"
 	gorbac_redis "github.com/kordar/gorbac-redis"
 	"github.com/redis/go-redis/v9"
-	"testing"
-	"time"
 )
 
-func handle() *gorbac_redis.RedisRbac {
+func handle(t *testing.T) *gorbac_redis.RedisRbac {
+	addrsEnv := strings.TrimSpace(os.Getenv("RBAC_REDIS_ADDRS"))
+	password := os.Getenv("RBAC_REDIS_PASSWORD")
+	table := os.Getenv("RBAC_REDIS_TABLE")
+	if table == "" {
+		table = "RBAC_TEST"
+	}
+	// 没有提供地址则跳过集成测试，避免泄露凭据或连接失败
+	if addrsEnv == "" {
+		t.Skip("skip redis integration tests: set RBAC_REDIS_ADDRS to enable")
+		return nil
+	}
+	addrs := strings.Split(addrsEnv, ",")
 	rdb := redis.NewUniversalClient(&redis.UniversalOptions{
-		Addrs:    []string{"43.139.223.7:8088"},
-		Password: "940430Dex",
+		Addrs:    addrs,
+		Password: password,
 	})
-	return gorbac_redis.NewRedisRbac(rdb, "TEST0000001")
+	return gorbac_redis.NewRedisRbac(rdb, table)
 }
 
 func TestService(t *testing.T) {
-	service := gorbac.NewRbacService(handle(), false)
+	service := gorbac.NewRbacService(handle(t), false)
 	//service.AddRole("AAA", "", "")
 	//service.AddPermission("BBB", "", "")
 	//err := service.AssignRole("AAA", "BBB")
@@ -41,7 +56,7 @@ func print(item interface{}) {
 }
 
 func TestRedis(t *testing.T) {
-	rbac := handle()
+	rbac := handle(t)
 	//ctx := context.Background()
 	//rdb.SAdd(ctx, "aaa", "2324", "32132")
 	//authItem := gorbac_redis.AuthItem{Name: "DDD", Type: 0, Description: "", RuleName: "", ExecuteName: "", CreateTime: time.Now(), UpdateTime: time.Now()}
@@ -63,7 +78,7 @@ func TestRedis(t *testing.T) {
 }
 
 func TestRules(t *testing.T) {
-	rbac := handle()
+	rbac := handle(t)
 	rule := gorbac.Rule{
 		Name:        "theRule",
 		ExecuteName: "xxxx",
@@ -89,7 +104,7 @@ func TestRules(t *testing.T) {
 }
 
 func TestChildren(t *testing.T) {
-	rbac := handle()
+	rbac := handle(t)
 	_ = rbac.AddItemChild(gorbac.ItemChild{"TTT", "BBB"})
 	_ = rbac.AddItemChild(gorbac.ItemChild{"TTT", "CCC"})
 	_ = rbac.AddItemChild(gorbac.ItemChild{"DDD", "TTT"})
@@ -107,7 +122,7 @@ func TestChildren(t *testing.T) {
 }
 
 func TestRedisRbac_GetAssignment(t *testing.T) {
-	rbac := handle()
+	rbac := handle(t)
 	rbac.Assign(*gorbac.NewAssignment(123, "AAA"))
 	rbac.Assign(*gorbac.NewAssignment(123, "BBB"))
 	rbac.Assign(*gorbac.NewAssignment(124, "BBB"))
@@ -122,7 +137,7 @@ func TestRedisRbac_GetAssignment(t *testing.T) {
 }
 
 func TestUser(t *testing.T) {
-	rbac := handle()
+	rbac := handle(t)
 	//user, err := rbac.FindPermissionsByUser(124)
 	//list, err := rbac.FindChildrenList()
 	list, err := rbac.GetItemList(2, []string{"CCC"})
@@ -131,7 +146,7 @@ func TestUser(t *testing.T) {
 }
 
 func TestManager(t *testing.T) {
-	service := gorbac.NewRbacService(handle(), false)
+	service := gorbac.NewRbacService(handle(t), false)
 	manager := service.GetAuthManager()
 	role := gorbac.NewRole("guest", "guest", "", "", time.Now(), time.Now())
 	p1 := gorbac.NewPermission("AAA", "", "demo", "demo", time.Now(), time.Now())
