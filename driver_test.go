@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	logger "github.com/kordar/gologger"
+	"log/slog"
 	"github.com/kordar/gorbac"
 	gorbac_redis "github.com/kordar/gorbac-redis"
 	"github.com/redis/go-redis/v9"
@@ -47,12 +47,12 @@ func TestService(t *testing.T) {
 	//flag := service.Assign(123, "AAA")
 	//service.CleanAssigns(123)
 	flag := service.UpdateRole("AAA", "TTT", "teste", "")
-	logger.Info("------------------", flag)
+	slog.Info("------------------", "flag", flag)
 }
 
 func print(item interface{}) {
 	marshal, _ := json.Marshal(item)
-	logger.Infof("------------%v", string(marshal))
+	slog.Info("------------", "value", string(marshal))
 }
 
 func TestRedis(t *testing.T) {
@@ -74,7 +74,7 @@ func TestRedis(t *testing.T) {
 	//logger.Infof("============%+v", items)
 	//err := rbac.UpdateItem("AAA", gorbac.NewPermission("TTT", "test", "", "", time.Now(), time.Now()))
 	err := rbac.RemoveItem("TTT")
-	logger.Infof("--------------%v", err)
+	slog.Info("--------------", "err", err)
 }
 
 func TestRules(t *testing.T) {
@@ -86,12 +86,12 @@ func TestRules(t *testing.T) {
 		UpdateTime:  time.Now(),
 	}
 	addErr := rbac.AddRule(rule)
-	logger.Infof("add rule = %v", addErr)
+	slog.Info("add rule", "err", addErr)
 	getRule, getRuleErr := rbac.GetRule("theRule")
-	logger.Infof("get rule = %v", getRuleErr)
+	slog.Info("get rule", "err", getRuleErr)
 	print(getRule)
 	rules, getRulesErr := rbac.GetRules()
-	logger.Infof("get rules = %v", getRulesErr)
+	slog.Info("get rules", "err", getRulesErr)
 	print(rules)
 	//rbac.RemoveRule("theRule")
 	rule2 := gorbac.Rule{
@@ -114,7 +114,7 @@ func TestChildren(t *testing.T) {
 	//logger.Infof("----------%v", rbac.HasChild("AAA", "EEE"))
 	children, err := rbac.FindChildren("AAA")
 	//children, err := rbac.FindChildren("ccc")
-	logger.Infof("-------------%v", err)
+	slog.Info("-------------", "err", err)
 	print(children)
 	//child := rbac.HasChild("ccc", "bbb")
 	//logger.Infof("========%v", child)
@@ -141,7 +141,7 @@ func TestUser(t *testing.T) {
 	//user, err := rbac.FindPermissionsByUser(124)
 	//list, err := rbac.FindChildrenList()
 	list, err := rbac.GetItemList(2, []string{"CCC"})
-	logger.Infof("--------------%v", err)
+	slog.Info("--------------", "err", err)
 	print(list)
 }
 
@@ -163,7 +163,7 @@ func TestManager(t *testing.T) {
 	manager.Add(admin)
 	manager.AddChild(admin, role)
 	err := manager.AddChild(role, admin)
-	logger.Errorf("xxxxxxxxx%v", err)
+	slog.Error("xxxxxxxxx", "err", err)
 	//manager.SetDefaultRoles(role)
 
 	gorbac.ExecuteManager.AddExecutor(&gorbac.DemoExecutor{})
@@ -173,5 +173,5 @@ func TestManager(t *testing.T) {
 	//manager.RemoveAllAssignmentByUser(213)
 
 	access := manager.CheckAccess(nil, 213, "AAA")
-	logger.Infof("=================%v", access)
+	slog.Info("=================", "access", access)
 }
